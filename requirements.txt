@@ -1,0 +1,26 @@
+# ArXiv Quantum Physics Paper Triage Agent - Dependencies
+
+# Core ADK framework
+google-adk>=0.1.0
+
+# Google Generative AI
+google-generativeai>=0.3.0
+
+# Standard library dependencies (included with Python, listed for reference)
+# urllib
+# xml.etree.ElementTree
+# asyncio
+# logging
+# dataclasses
+# re
+# datetime
+# typing
+
+# Optional dependencies for deployment
+flask>=2.3.0  # For REST API deployment
+gunicorn>=21.2.0  # Production WSGI server
+
+# Optional dependencies for enhanced functionality
+numpy>=1.24.0  # For advanced numerical operations
+pandas>=2.0.0  # For data analysis
+matplotlib>=3.7.0  # For visualization

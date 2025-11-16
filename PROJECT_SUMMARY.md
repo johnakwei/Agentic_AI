@@ -357,11 +357,11 @@ echo $GEMINI_API_KEY
 - **Course Materials**: Check the 5-day notebooks
 
 ### Your Information (Update These)
-- **Name**: [Your Name]
-- **Email**: [Your Email]
-- **GitHub**: [Your GitHub]
-- **LinkedIn**: [Your LinkedIn]
-- **Kaggle**: [Your Kaggle Username]
+- **Name**: John Akwei, Senior Data Scientist
+- **Email**: johnakwei1@gmail.com
+- **GitHub**: https://github.com/johnakwei
+- **LinkedIn**: https://www.linkedin.com/in/john-akwei-8138b02/
+- **Kaggle**: johnakwei
 
 ---
 

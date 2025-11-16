@@ -2,8 +2,8 @@
 
 > **Kaggle 5-Day AI Agents Intensive - Capstone Project**  
 > **Track:** Agents for Good  
-> **Author:** [Your Name]  
-> **Date:** November 2025
+> **Author:** John Akwei, Senior Data Scientist 
+> **Date:** November 15, 2025
 
 ---
 
@@ -620,9 +620,9 @@ Apache 2.0 License - See LICENSE file for details
 ## 📞 Contact
 
 - **Author**: John Akwei, Senior Data Scientist
-- **Email**: [Your Email]
-- **GitHub**: [Your GitHub]
-- **LinkedIn**: [Your LinkedIn]
+- **Email**: johnakwei1@gmail.com
+- **GitHub**: https://github.com/johnakwei/
+- **LinkedIn**: https://www.linkedin.com/in/john-akwei-8138b02/
 
 ---
 
@@ -631,8 +631,8 @@ Apache 2.0 License - See LICENSE file for details
 **Track**: Agents for Good  
 **Submission Date**: December 1, 2025  
 **GitHub Repository**: https://github.com/johnakwei/Agentic_AI  
-**Kaggle Notebook**: [Link to Kaggle notebook]  
-**Demo Video**: [Link to YouTube]
+**Kaggle Notebook**: https://www.kaggle.com/competitions/agents-intensive-capstone-project/writeups/arxiv-triage-and-summarization-agent 
+**Demo Video**: https://www.youtube.com/watch?v=VOgl54aNxOI
 
 ---
 

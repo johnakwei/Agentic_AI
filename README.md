@@ -221,7 +221,9 @@ export GEMINI_API_KEY='your-api-key-here'
 3. **Run the agent**
 
 ```bash
-python arxiv_quantum_agent.py
+python -m pip install google-generativeai
+$env:GEMINI_API_KEY = "your-api-key-here"
+python arxiv_quantum_agent_vscode.py
 ```
 
 ### Configuration

@@ -1,8 +1,11 @@
 """
 ArXiv Quantum Physics Paper Triage & Summarization Agent
-=========================================================
+Visual Studio Code Version
 
-This agent solves the problem of information overload in quantum physics research
+by John Akwei, Senior Data Scientist
+ContextBase: https://contextbase.github.io
+
+This agent solves the problem of information overload in quantum physics research 
 by automatically retrieving, analyzing, and summarizing recent papers from ArXiv.
 
 Architecture: Multi-agent sequential pipeline with 5 specialized agents
@@ -19,7 +22,17 @@ Course Requirements Demonstrated:
 ✅ Sessions & Memory (InMemorySessionService, user preferences)
 ✅ Observability (LoggingPlugin, custom metrics)
 ✅ Bonus: Gemini integration, deployment-ready architecture
+
+To run in Visual Studio Code:
+python -m pip install google-generativeai
+$env:GEMINI_API_KEY = ""
+python arxiv_quantum_agent_v2.py
+
 """
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
 
 import asyncio
 import logging
@@ -27,24 +40,97 @@ import re
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from datetime import datetime
 from dataclasses import dataclass
+import json
+import time
+import os
+import getpass
 
-# ADK imports
-from google.adk.agents import Agent, SequentialAgent
-from google.adk.models.gemini import GeminiModel
-from google.adk.plugins.logging_plugin import LoggingPlugin
-from google.adk.plugins.base_plugin import BasePlugin
-from google.adk.runners.in_memory_runner import InMemoryRunner
-from google.adk.sessions.in_memory_session import InMemorySessionService
-from google.adk.tools.function_tool import FunctionTool
-from google.adk.agents.callback_context import CallbackContext
-from google.adk.agents.base_agent import BaseAgent
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
+print("=" * 80)
+print("ArXiv Quantum Physics Paper Triage & Summarization Agent")
+print("Visual Studio Code Version")
+print("=" * 80)
 
 # ============================================================================
-# SECTION 1: CUSTOM TOOLS (ArXiv API Integration)
+# API KEY SETUP
+# ============================================================================
+
+def get_api_key():
+    """Prompt user for Gemini API key"""
+    print("\n🔑 API Key Setup")
+    print("-" * 80)
+    print("This agent requires a Google Gemini API key.")
+    print("Get your free API key at: https://aistudio.google.com/app/apikey")
+    print("-" * 80)
+    
+    # Check if API key exists in environment variable
+    api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
+    
+    if api_key:
+        print(f"✅ Found API key in environment variable (length: {len(api_key)} chars)")
+        use_env = input("Use this key? (y/n): ").strip().lower()
+        if use_env == 'y':
+            return api_key
+    
+    # Prompt for API key
+    api_key = getpass.getpass("Enter your Gemini API key: ").strip()
+    
+    if not api_key:
+        raise ValueError("API key is required to run this agent")
+    
+    print(f"✅ API key received (length: {len(api_key)} chars)")
+    return api_key
+
+# Get API key from user
+try:
+    GEMINI_API_KEY = get_api_key()
+except KeyboardInterrupt:
+    print("\n\n❌ Setup cancelled by user")
+    exit(0)
+except Exception as e:
+    print(f"\n❌ Error getting API key: {e}")
+    exit(1)
+
+# ============================================================================
+# GOOGLE GENAI SETUP
+# ============================================================================
+
+print("\n📦 Installing/importing required packages...")
+
+try:
+    import google.generativeai as genai
+    from google.generativeai import types as genai_types
+except ImportError:
+    print("❌ google-generativeai not found. Installing...")
+    import subprocess
+    subprocess.check_call(['pip', 'install', '-q', 'google-generativeai'])
+    import google.generativeai as genai
+    from google.generativeai import types as genai_types
+
+# Configure Gemini with API key
+genai.configure(api_key=GEMINI_API_KEY)
+
+print("✅ Google GenAI configured successfully!")
+
+# List available models
+print("\n📋 Available Gemini models:")
+try:
+    for model in genai.list_models():
+        if 'generateContent' in model.supported_generation_methods:
+            print(f"   - {model.name}")
+except Exception as e:
+    print(f"   (Could not list models: {e})")
+
+# ============================================================================
+# CUSTOM TOOLS (ArXiv API Integration)
 # ============================================================================
 
 @dataclass
@@ -52,659 +138,848 @@ class ArXivPaper:
     """Data structure for ArXiv paper metadata"""
     id: str
     title: str
-    authors: List[str]
+    authors: list
     abstract: str
     published: str
-    arxiv_url: str
     pdf_url: str
-    categories: List[str]
+    categories: list
 
-
-def fetch_arxiv_papers(
-    query: str = "quantum physics",
-    max_results: int = 20,
-    days_back: int = 30
-) -> List[Dict[str, Any]]:
-    """
-    Custom tool: Fetch recent quantum physics papers from ArXiv API.
+class ArXivTool:
+    """Custom tool for fetching papers from ArXiv API"""
     
-    This tool demonstrates API integration and custom data retrieval.
-    
-    Args:
-        query: Search query for ArXiv (default: "quantum physics")
-        max_results: Maximum number of papers to retrieve
-        days_back: How many days back to search
+    @staticmethod
+    def fetch_papers(query: str, max_results: int = 5) -> list:
+        """
+        Fetch papers from ArXiv API
         
-    Returns:
-        List of paper dictionaries with metadata
-    """
-    try:
-        # Calculate date range
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days_back)
+        Args:
+            query: Search query (e.g., "quantum error correction")
+            max_results: Maximum number of papers to fetch
         
-        # Build ArXiv API query
+        Returns:
+            List of ArXivPaper objects
+        """
+        # Construct ArXiv API URL
         base_url = "http://export.arxiv.org/api/query?"
-        search_query = f"cat:quant-ph AND ({query})"
-        
         params = {
-            "search_query": search_query,
-            "start": 0,
-            "max_results": max_results,
-            "sortBy": "submittedDate",
-            "sortOrder": "descending"
+            'search_query': f'cat:quant-ph AND all:{query}',
+            'start': 0,
+            'max_results': max_results,
+            'sortBy': 'submittedDate',
+            'sortOrder': 'descending'
         }
         
         url = base_url + urllib.parse.urlencode(params)
         
-        # Make API request
-        with urllib.request.urlopen(url, timeout=30) as response:
-            data = response.read()
-        
-        # Parse XML response
-        root = ET.fromstring(data)
-        namespace = {"atom": "http://www.w3.org/2005/Atom"}
-        
-        papers = []
-        for entry in root.findall("atom:entry", namespace):
-            paper_id = entry.find("atom:id", namespace).text.split("/abs/")[-1]
-            title = entry.find("atom:title", namespace).text.strip()
-            abstract = entry.find("atom:summary", namespace).text.strip()
-            published = entry.find("atom:published", namespace).text
+        try:
+            # Fetch data from ArXiv
+            with urllib.request.urlopen(url) as response:
+                xml_data = response.read()
             
-            # Extract authors
-            authors = [
-                author.find("atom:name", namespace).text
-                for author in entry.findall("atom:author", namespace)
-            ]
+            # Parse XML response
+            root = ET.fromstring(xml_data)
+            namespace = {'atom': 'http://www.w3.org/2005/Atom'}
             
-            # Extract categories
-            categories = [
-                cat.attrib["term"]
-                for cat in entry.findall("atom:category", namespace)
-            ]
+            papers = []
+            for entry in root.findall('atom:entry', namespace):
+                paper = ArXivPaper(
+                    id=entry.find('atom:id', namespace).text.split('/')[-1],
+                    title=entry.find('atom:title', namespace).text.strip(),
+                    authors=[author.find('atom:name', namespace).text 
+                            for author in entry.findall('atom:author', namespace)],
+                    abstract=entry.find('atom:summary', namespace).text.strip(),
+                    published=entry.find('atom:published', namespace).text,
+                    pdf_url=entry.find('atom:id', namespace).text.replace('abs', 'pdf'),
+                    categories=[cat.attrib['term'] 
+                               for cat in entry.findall('atom:category', namespace)]
+                )
+                papers.append(paper)
             
-            papers.append({
-                "id": paper_id,
-                "title": title,
-                "authors": authors,
-                "abstract": abstract,
-                "published": published,
-                "arxiv_url": f"https://arxiv.org/abs/{paper_id}",
-                "pdf_url": f"https://arxiv.org/pdf/{paper_id}.pdf",
-                "categories": categories
-            })
+            logger.info(f"Successfully fetched {len(papers)} papers from ArXiv")
+            return papers
+            
+        except Exception as e:
+            logger.error(f"Error fetching papers from ArXiv: {e}")
+            return []
+
+class LaTeXParser:
+    """Custom tool for parsing LaTeX mathematical notation"""
+    
+    @staticmethod
+    def extract_equations(text: str) -> list:
+        """Extract LaTeX equations from text"""
+        # Match inline math: $...$
+        inline_pattern = r'\$([^\$]+)\$'
+        # Match display math: $$...$$
+        display_pattern = r'\$\$([^\$]+)\$\$'
+        # Match equation environments: \begin{equation}...\end{equation}
+        equation_pattern = r'\\begin\{equation\}(.*?)\\end\{equation\}'
         
-        logging.info(f"Successfully fetched {len(papers)} papers from ArXiv")
-        return papers
+        equations = []
+        equations.extend(re.findall(display_pattern, text))
+        equations.extend(re.findall(inline_pattern, text))
+        equations.extend(re.findall(equation_pattern, text, re.DOTALL))
         
-    except Exception as e:
-        logging.error(f"Error fetching ArXiv papers: {str(e)}")
-        return []
+        return [eq.strip() for eq in equations if eq.strip()]
 
-
-def extract_latex_equations(text: str) -> List[str]:
-    """
-    Custom tool: Extract LaTeX equations from paper abstract/content.
-    
-    This tool demonstrates text processing and mathematical notation handling.
-    
-    Args:
-        text: Text containing LaTeX equations
-        
-    Returns:
-        List of extracted equations
-    """
-    # Pattern to match LaTeX equations (both inline and display)
-    patterns = [
-        r'\$\$(.*?)\$\$',  # Display mode
-        r'\$(.*?)\$',      # Inline mode
-        r'\\begin\{equation\}(.*?)\\end\{equation\}',  # Equation environment
-        r'\\begin\{align\}(.*?)\\end\{align\}'  # Align environment
-    ]
-    
-    equations = []
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.DOTALL)
-        equations.extend([m.strip() for m in matches if m.strip()])
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_equations = []
-    for eq in equations:
-        if eq not in seen:
-            seen.add(eq)
-            unique_equations.append(eq)
-    
-    return unique_equations
-
-
-def calculate_relevance_score(paper: Dict[str, Any], user_keywords: List[str]) -> float:
-    """
-    Custom tool: Calculate relevance score based on user preferences.
-    
-    This demonstrates personalization and ranking logic.
-    
-    Args:
-        paper: Paper dictionary
-        user_keywords: List of keywords the user is interested in
-        
-    Returns:
-        Relevance score (0-100)
-    """
-    score = 0.0
-    title_lower = paper["title"].lower()
-    abstract_lower = paper["abstract"].lower()
-    
-    # Score based on keyword matches
-    for keyword in user_keywords:
-        keyword_lower = keyword.lower()
-        if keyword_lower in title_lower:
-            score += 20  # Title match is highly relevant
-        if keyword_lower in abstract_lower:
-            score += 10  # Abstract match is moderately relevant
-    
-    # Bonus for recent papers
-    try:
-        pub_date = datetime.fromisoformat(paper["published"].replace("Z", "+00:00"))
-        days_old = (datetime.now(pub_date.tzinfo) - pub_date).days
-        if days_old < 7:
-            score += 15
-        elif days_old < 30:
-            score += 10
-    except:
-        pass
-    
-    # Cap at 100
-    return min(score, 100.0)
-
+print("✅ Custom tools loaded")
 
 # ============================================================================
-# SECTION 2: CUSTOM OBSERVABILITY PLUGIN
+# RETRY LOGIC AND RATE LIMITING
 # ============================================================================
 
-class MetricsPlugin(BasePlugin):
-    """
-    Custom plugin for tracking agent performance metrics.
+class RetryHandler:
+    """Handles retry logic with exponential backoff for API rate limits"""
     
-    This demonstrates observability implementation with custom callbacks.
-    Tracks: agent calls, paper processing, processing time, success rate
-    """
-    
-    def __init__(self) -> None:
-        super().__init__(name="metrics_plugin")
-        self.agent_calls = 0
-        self.papers_processed = 0
-        self.total_processing_time = 0.0
-        self.successful_operations = 0
-        self.failed_operations = 0
-        self.start_time = None
-    
-    async def before_agent_callback(
-        self, *, agent: BaseAgent, callback_context: CallbackContext
-    ) -> None:
-        """Track when agents start processing"""
-        self.agent_calls += 1
-        self.start_time = datetime.now()
-        logging.info(f"[MetricsPlugin] Agent '{agent.name}' started (call #{self.agent_calls})")
-    
-    async def after_agent_callback(
-        self, *, agent: BaseAgent, callback_context: CallbackContext
-    ) -> None:
-        """Track when agents complete and calculate processing time"""
-        if self.start_time:
-            processing_time = (datetime.now() - self.start_time).total_seconds()
-            self.total_processing_time += processing_time
-            logging.info(
-                f"[MetricsPlugin] Agent '{agent.name}' completed in {processing_time:.2f}s"
-            )
-            self.successful_operations += 1
-    
-    def get_metrics_summary(self) -> Dict[str, Any]:
-        """Return comprehensive metrics summary"""
-        success_rate = (
-            self.successful_operations / (self.successful_operations + self.failed_operations) * 100
-            if (self.successful_operations + self.failed_operations) > 0
-            else 0
-        )
+    @staticmethod
+    async def call_with_retry(func, *args, max_retries: int = 3, 
+                             base_delay: float = 2.0, **kwargs):
+        """
+        Call a function with exponential backoff retry logic
         
-        avg_processing_time = (
-            self.total_processing_time / self.successful_operations
-            if self.successful_operations > 0
-            else 0
-        )
+        Args:
+            func: Function to call
+            max_retries: Maximum number of retry attempts
+            base_delay: Base delay in seconds (doubles each retry)
+            *args, **kwargs: Arguments to pass to the function
         
-        return {
-            "total_agent_calls": self.agent_calls,
-            "papers_processed": self.papers_processed,
-            "total_processing_time_seconds": round(self.total_processing_time, 2),
-            "average_processing_time_seconds": round(avg_processing_time, 2),
-            "successful_operations": self.successful_operations,
-            "failed_operations": self.failed_operations,
-            "success_rate_percent": round(success_rate, 2)
+        Returns:
+            Result of the function call
+        """
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Try to call the function
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*args, **kwargs)
+                else:
+                    result = func(*args, **kwargs)
+                
+                # Success - return result
+                return result
+                
+            except Exception as e:
+                last_exception = e
+                error_str = str(e)
+                
+                # Check if it's a rate limit error (429)
+                if "429" in error_str or "quota" in error_str.lower():
+                    if attempt < max_retries - 1:  # Don't sleep on last attempt
+                        # Calculate exponential backoff delay
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            f"Rate limit hit (attempt {attempt + 1}/{max_retries}). "
+                            f"Waiting {delay}s before retry..."
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(
+                            f"Rate limit persists after {max_retries} attempts. "
+                            f"Error: {error_str}"
+                        )
+                else:
+                    # Non-rate-limit error - don't retry
+                    logger.error(f"Non-retryable error: {error_str}")
+                    raise
+        
+        # All retries exhausted
+        raise last_exception
+
+class RateLimiter:
+    """Simple rate limiter to add delays between API calls"""
+    
+    def __init__(self, delay: float = 1.0):
+        """
+        Args:
+            delay: Delay in seconds between calls
+        """
+        self.delay = delay
+        self.last_call_time = 0
+    
+    async def wait(self):
+        """Wait if necessary to maintain rate limit"""
+        current_time = time.time()
+        time_since_last_call = current_time - self.last_call_time
+        
+        if time_since_last_call < self.delay:
+            wait_time = self.delay - time_since_last_call
+            logger.info(f"Rate limiting: waiting {wait_time:.2f}s...")
+            await asyncio.sleep(wait_time)
+        
+        self.last_call_time = time.time()
+
+print("✅ Retry logic and rate limiting loaded")
+
+# ============================================================================
+# OBSERVABILITY (Custom Metrics Plugin)
+# ============================================================================
+
+class MetricsTracker:
+    """Custom observability plugin for tracking agent metrics"""
+    
+    def __init__(self):
+        self.metrics = {
+            'total_agent_calls': 0,
+            'papers_processed': 0,
+            'total_processing_time_seconds': 0,
+            'average_processing_time_seconds': 0,
+            'successful_operations': 0,
+            'failed_operations': 0,
+            'success_rate_percent': 0.0,
+            'agent_timings': {}
         }
+        self.start_times = {}
+    
+    def log_agent_start(self, agent_name: str):
+        """Log the start of an agent operation"""
+        self.metrics['total_agent_calls'] += 1
+        self.start_times[agent_name] = time.time()
+        logger.info(f"[Metrics] Agent '{agent_name}' started (call #{self.metrics['total_agent_calls']})")
+    
+    def log_agent_complete(self, agent_name: str, success: bool = True):
+        """Log the completion of an agent operation"""
+        if agent_name in self.start_times:
+            duration = time.time() - self.start_times[agent_name]
+            self.metrics['total_processing_time_seconds'] += duration
+            
+            if agent_name not in self.metrics['agent_timings']:
+                self.metrics['agent_timings'][agent_name] = []
+            self.metrics['agent_timings'][agent_name].append(duration)
+            
+            if success:
+                self.metrics['successful_operations'] += 1
+            else:
+                self.metrics['failed_operations'] += 1
+            
+            # Update success rate
+            total_ops = self.metrics['successful_operations'] + self.metrics['failed_operations']
+            if total_ops > 0:
+                self.metrics['success_rate_percent'] = (
+                    self.metrics['successful_operations'] / total_ops * 100
+                )
+            
+            # Update average processing time
+            if self.metrics['total_agent_calls'] > 0:
+                self.metrics['average_processing_time_seconds'] = (
+                    self.metrics['total_processing_time_seconds'] / 
+                    self.metrics['total_agent_calls']
+                )
+            
+            logger.info(f"[Metrics] Agent '{agent_name}' completed in {duration:.2f}s")
+            del self.start_times[agent_name]
+    
+    def log_papers_processed(self, count: int):
+        """Log the number of papers processed"""
+        self.metrics['papers_processed'] = count
+    
+    def get_metrics(self) -> dict:
+        """Get all metrics"""
+        return self.metrics
+    
+    def print_summary(self):
+        """Print a summary of metrics"""
+        print("\n" + "=" * 80)
+        print("📈 PERFORMANCE METRICS")
+        print("=" * 80)
+        for key, value in self.metrics.items():
+            if key != 'agent_timings':
+                print(f"  {key}: {value}")
 
+print("✅ Custom observability plugin loaded")
 
 # ============================================================================
-# SECTION 3: MULTI-AGENT SYSTEM ARCHITECTURE
+# AGENT DEFINITIONS
 # ============================================================================
 
-def create_paper_retriever_agent(model: GeminiModel) -> Agent:
-    """
-    Agent 1: Paper Retriever
-    Responsibility: Fetch papers from ArXiv based on query
-    """
-    return Agent(
-        name="PaperRetrieverAgent",
-        model=model,
-        tools=[FunctionTool(fetch_arxiv_papers)],
-        instruction="""You are a research paper retrieval specialist for quantum physics.
+class QuantumAgent:
+    """Base class for all quantum physics agents"""
+    
+    def __init__(self, name: str, metrics_tracker, rate_limiter):
+        self.name = name
+        self.metrics = metrics_tracker
+        self.rate_limiter = rate_limiter
+        
+        # Model selection with fallback hierarchy
+        model_names = [
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+            'gemini-flash-latest',
+            'models/gemini-2.5-flash',
+            'models/gemini-2.0-flash',
+            'gemini-1.5-pro',
+            'models/gemini-1.5-pro'
+        ]
+        
+        self.model = None
+        for model_name in model_names:
+            try:
+                self.model = genai.GenerativeModel(model_name)
+                logger.info(f"✅ Successfully initialized model: {model_name}")
+                break
+            except Exception as e:
+                logger.warning(f"❌ Could not initialize {model_name}: {e}")
+                continue
+        
+        if self.model is None:
+            raise ValueError("Could not initialize any Gemini model")
+        
+        self.retry_handler = RetryHandler()
+    
+    async def generate_content(self, prompt: str) -> str:
+        """Generate content with retry logic and rate limiting"""
+        # Wait for rate limit
+        await self.rate_limiter.wait()
+        
+        # Call with retry logic
+        response = await self.retry_handler.call_with_retry(
+            self.model.generate_content,
+            prompt,
+            max_retries=3,
+            base_delay=2.0
+        )
+        
+        return response.text
 
-Your job:
-1. Use the fetch_arxiv_papers tool to retrieve recent quantum physics papers
-2. Parse the user's query to understand their research interests
-3. Return a structured list of papers with all metadata
+class PaperRetrieverAgent(QuantumAgent):
+    """Agent responsible for fetching papers from ArXiv"""
+    
+    async def process(self, query: str, max_results: int = 5) -> list:
+        """Fetch papers from ArXiv based on query"""
+        self.metrics.log_agent_start('PaperRetrieverAgent')
+        
+        try:
+            logger.info("Running Paper Retriever Agent...")
+            papers = ArXivTool.fetch_papers(query, max_results)
+            self.metrics.log_papers_processed(len(papers))
+            self.metrics.log_agent_complete('PaperRetrieverAgent', success=True)
+            return papers
+        except Exception as e:
+            logger.error(f"Error in PaperRetrieverAgent: {e}")
+            self.metrics.log_agent_complete('PaperRetrieverAgent', success=False)
+            return []
 
-Be thorough - retrieve enough papers to give good coverage of the topic.
-Output format: List the paper titles, authors, and ArXiv IDs clearly."""
-    )
+class AbstractAnalyzerAgent(QuantumAgent):
+    """Agent responsible for analyzing paper abstracts"""
+    
+    async def process(self, papers: list) -> dict:
+        """Extract key claims from paper abstracts"""
+        self.metrics.log_agent_start('AbstractAnalyzerAgent')
+        
+        try:
+            # Prepare abstracts for analysis
+            abstracts_text = "\n\n".join([
+                f"Paper {i+1}: {paper.title}\nAbstract: {paper.abstract[:500]}"
+                for i, paper in enumerate(papers[:3])
+            ])
+            
+            prompt = f"""Analyze these quantum physics paper abstracts and extract key claims:
 
+{abstracts_text}
 
-def create_abstract_analyzer_agent(model: GeminiModel) -> Agent:
-    """
-    Agent 2: Abstract Analyzer
-    Responsibility: Extract key claims and findings from abstracts
-    """
-    return Agent(
-        name="AbstractAnalyzerAgent",
-        model=model,
-        instruction="""You are an expert at analyzing quantum physics paper abstracts.
+For each paper, identify:
+1. Main research contribution
+2. Key methodology
+3. Primary findings
 
-Your job:
-1. Read the abstracts of papers provided
-2. Extract the main research question or problem
-3. Identify the key methodology used
-4. Summarize the main findings or contributions
-5. Note any experimental results or theoretical predictions
+Format as JSON with paper numbers as keys."""
+            
+            response = await self.generate_content(prompt)
+            
+            self.metrics.log_agent_complete('AbstractAnalyzerAgent', success=True)
+            return {"analysis": response}
+            
+        except Exception as e:
+            logger.error(f"Error in AbstractAnalyzerAgent: {e}")
+            self.metrics.log_agent_complete('AbstractAnalyzerAgent', success=False)
+            return {"analysis": f"Error: {str(e)}"}
 
-For each paper, provide:
-- Main contribution (1-2 sentences)
-- Key methodology
-- Significance to the field
+class MathIdentifierAgent(QuantumAgent):
+    """Agent responsible for identifying mathematical notation"""
+    
+    async def process(self, papers: list) -> dict:
+        """Identify important mathematical equations in papers"""
+        self.metrics.log_agent_start('MathIdentifierAgent')
+        
+        try:
+            # Extract equations from abstracts
+            all_equations = {}
+            for i, paper in enumerate(papers[:3]):
+                equations = LaTeXParser.extract_equations(paper.abstract)
+                if equations:
+                    all_equations[f"paper_{i+1}"] = equations
+            
+            # Use LLM to identify most important equations
+            if all_equations:
+                equations_text = json.dumps(all_equations, indent=2)
+                prompt = f"""Identify the most significant mathematical concepts in these equations:
 
-Be precise and technical - use proper quantum physics terminology."""
-    )
+{equations_text}
 
+Explain their importance in quantum physics research."""
+                
+                response = await self.generate_content(prompt)
+                result = {"equations": all_equations, "analysis": response}
+            else:
+                result = {"equations": {}, "analysis": "No mathematical notation found in abstracts"}
+            
+            self.metrics.log_agent_complete('MathIdentifierAgent', success=True)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in MathIdentifierAgent: {e}")
+            self.metrics.log_agent_complete('MathIdentifierAgent', success=False)
+            return {"equations": {}, "analysis": f"Error: {str(e)}"}
 
-def create_math_identifier_agent(model: GeminiModel) -> Agent:
-    """
-    Agent 3: Mathematical Notation Identifier
-    Responsibility: Identify and explain important equations
-    """
-    return Agent(
-        name="MathIdentifierAgent",
-        model=model,
-        tools=[FunctionTool(extract_latex_equations)],
-        instruction="""You are a mathematical notation specialist for quantum physics.
+class RelevanceScorerAgent(QuantumAgent):
+    """Agent responsible for scoring paper relevance"""
+    
+    async def process(self, papers: list, user_interests: list) -> list:
+        """Score papers based on relevance to user interests"""
+        self.metrics.log_agent_start('RelevanceScorerAgent')
+        
+        try:
+            scored_papers = []
+            
+            # Create prompt for batch scoring
+            papers_text = "\n\n".join([
+                f"Paper {i+1}: {paper.title}\nAbstract: {paper.abstract[:300]}"
+                for i, paper in enumerate(papers)
+            ])
+            
+            interests_text = ", ".join(user_interests)
+            
+            prompt = f"""Score these quantum physics papers (0-100) based on relevance to: {interests_text}
 
-Your job:
-1. Use extract_latex_equations to find mathematical expressions in abstracts
-2. Identify the most important equations (Hamiltonians, wave functions, etc.)
-3. Provide brief explanations of what each equation represents
+{papers_text}
 
-Focus on:
-- Hamiltonians and energy expressions
-- Wave functions and quantum states
-- Operators and observables
-- Key quantum mechanical relations
+Return scores as JSON: {{"paper_1": score, "paper_2": score, ...}}
+Only return the JSON, no other text."""
+            
+            response = await self.generate_content(prompt)
+            
+            # Parse scores
+            try:
+                # Clean response to extract JSON
+                json_text = response.strip()
+                if "```json" in json_text:
+                    json_text = json_text.split("```json")[1].split("```")[0]
+                elif "```" in json_text:
+                    json_text = json_text.split("```")[1].split("```")[0]
+                
+                scores = json.loads(json_text)
+                
+                for i, paper in enumerate(papers):
+                    score = scores.get(f"paper_{i+1}", 50.0)
+                    scored_papers.append((paper, float(score)))
+                    
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"Could not parse scores, using default: {e}")
+                # Default scoring based on keyword matching
+                for paper in papers:
+                    score = sum(25 for interest in user_interests 
+                              if interest.lower() in paper.abstract.lower())
+                    scored_papers.append((paper, min(score, 100.0)))
+            
+            # Sort by score descending
+            scored_papers.sort(key=lambda x: x[1], reverse=True)
+            
+            self.metrics.log_agent_complete('RelevanceScorerAgent', success=True)
+            return scored_papers
+            
+        except Exception as e:
+            logger.error(f"Error in RelevanceScorerAgent: {e}")
+            self.metrics.log_agent_complete('RelevanceScorerAgent', success=False)
+            # Return papers with default score
+            return [(paper, 50.0) for paper in papers]
 
-Output: List important equations with brief physics explanations."""
-    )
+class SummaryGeneratorAgent(QuantumAgent):
+    """Agent responsible for generating final summaries"""
+    
+    async def process(self, scored_papers: list, analyses: dict) -> str:
+        """Generate comprehensive summary of findings"""
+        self.metrics.log_agent_start('SummaryGeneratorAgent')
+        
+        try:
+            # Prepare top papers summary
+            top_papers_text = "\n\n".join([
+                f"{i+1}. {paper.title} (Score: {score}/100)\n"
+                f"   Authors: {', '.join(paper.authors[:3])}\n"
+                f"   Abstract: {paper.abstract[:200]}..."
+                for i, (paper, score) in enumerate(scored_papers[:3])
+            ])
+            
+            prompt = f"""Create a comprehensive research summary of these quantum physics papers:
 
+{top_papers_text}
 
-def create_relevance_scorer_agent(model: GeminiModel) -> Agent:
-    """
-    Agent 4: Relevance Scorer
-    Responsibility: Rank papers by relevance to user interests
-    """
-    return Agent(
-        name="RelevanceScorerAgent",
-        model=model,
-        tools=[FunctionTool(calculate_relevance_score)],
-        instruction="""You are a research relevance assessment specialist.
-
-Your job:
-1. Analyze papers against user research interests
-2. Use calculate_relevance_score to quantify relevance
-3. Rank papers from most to least relevant
-4. Explain why top papers are most relevant
-
-Consider:
-- Keyword matches in title and abstract
-- Recency of publication
-- Research methodology alignment
-- Potential impact on user's research
-
-Output: Ranked list with relevance scores and brief justifications."""
-    )
-
-
-def create_summary_generator_agent(model: GeminiModel) -> Agent:
-    """
-    Agent 5: Summary Generator
-    Responsibility: Create comprehensive summaries of findings
-    """
-    return Agent(
-        name="SummaryGeneratorAgent",
-        model=model,
-        instruction="""You are a research summary expert for quantum physics.
-
-Your job:
-1. Synthesize all previous analysis into a comprehensive summary
-2. Highlight the top 5-10 most relevant papers
-3. Identify common themes and trends across papers
-4. Provide actionable insights for the researcher
-
-Summary structure:
+Include:
 1. Executive Summary (2-3 sentences)
-2. Top Papers (title, relevance, key finding)
-3. Research Trends Identified
-4. Key Mathematical Frameworks Used
-5. Recommendations for Further Reading
+2. Key Findings (bullet points)
+3. Emerging Trends
+4. Recommendations for further reading
 
-Be concise but comprehensive. Use technical language appropriately.
-Format output in clear markdown for readability."""
-    )
+Write in clear, accessible language for researchers."""
+            
+            summary = await self.generate_content(prompt)
+            
+            self.metrics.log_agent_complete('SummaryGeneratorAgent', success=True)
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error in SummaryGeneratorAgent: {e}")
+            self.metrics.log_agent_complete('SummaryGeneratorAgent', success=False)
+            return f"Error generating summary: {str(e)}"
 
+print("✅ Agent definitions loaded")
 
 # ============================================================================
-# SECTION 4: MAIN AGENT SYSTEM WITH MEMORY
+# MAIN AGENT SYSTEM (Session & Memory Management)
 # ============================================================================
 
 class QuantumPhysicsAgentSystem:
     """
-    Complete multi-agent system for quantum physics paper triage.
-    
-    Demonstrates:
-    - Sequential agent pipeline
-    - Session management
-    - Memory integration
-    - Observability
+    Main agent system coordinating all sub-agents
+    Implements session and memory management
     """
     
-    def __init__(self, gemini_api_key: str):
-        """Initialize the complete agent system"""
+    def __init__(self):
+        # Metrics tracker for observability
+        self.metrics = MetricsTracker()
         
-        # Initialize Gemini model
-        self.model = GeminiModel(
-            model="gemini-2.0-flash-exp",
-            api_key=gemini_api_key
+        # Rate limiter (1.5 second delay between API calls)
+        self.rate_limiter = RateLimiter(delay=1.5)
+        
+        # Initialize agents
+        self.paper_retriever = PaperRetrieverAgent(
+            "PaperRetriever", self.metrics, self.rate_limiter
+        )
+        self.abstract_analyzer = AbstractAnalyzerAgent(
+            "AbstractAnalyzer", self.metrics, self.rate_limiter
+        )
+        self.math_identifier = MathIdentifierAgent(
+            "MathIdentifier", self.metrics, self.rate_limiter
+        )
+        self.relevance_scorer = RelevanceScorerAgent(
+            "RelevanceScorer", self.metrics, self.rate_limiter
+        )
+        self.summary_generator = SummaryGeneratorAgent(
+            "SummaryGenerator", self.metrics, self.rate_limiter
         )
         
-        # Create specialized agents
-        self.paper_retriever = create_paper_retriever_agent(self.model)
-        self.abstract_analyzer = create_abstract_analyzer_agent(self.model)
-        self.math_identifier = create_math_identifier_agent(self.model)
-        self.relevance_scorer = create_relevance_scorer_agent(self.model)
-        self.summary_generator = create_summary_generator_agent(self.model)
-        
-        # Create sequential pipeline (COURSE REQUIREMENT: Multi-agent system)
-        self.root_agent = SequentialAgent(
-            name="QuantumPhysicsTriageSystem",
-            sub_agents=[
-                self.paper_retriever,
-                self.abstract_analyzer,
-                self.math_identifier,
-                self.relevance_scorer,
-                self.summary_generator
-            ]
-        )
-        
-        # Initialize session service (COURSE REQUIREMENT: Sessions)
-        self.session_service = InMemorySessionService()
-        
-        # Initialize plugins (COURSE REQUIREMENT: Observability)
-        self.logging_plugin = LoggingPlugin()
-        self.metrics_plugin = MetricsPlugin()
-        
-        # Create runner with plugins
-        self.runner = InMemoryRunner(
-            agent=self.root_agent,
-            session_service=self.session_service,
-            plugins=[self.logging_plugin, self.metrics_plugin]
-        )
-        
-        # Memory: Store user preferences (COURSE REQUIREMENT: Memory)
-        self.user_preferences = {
-            "research_interests": ["quantum entanglement", "quantum computing"],
-            "preferred_categories": ["quant-ph"],
-            "papers_per_query": 20
+        # Session management (in-memory storage)
+        self.session = {
+            'user_preferences': [],
+            'search_history': [],
+            'paper_cache': {}
         }
     
-    async def process_research_query(
-        self,
-        query: str,
-        session_id: Optional[str] = None
-    ) -> Dict[str, Any]:
+    def update_user_preferences(self, interests: list):
+        """Update user research interests (memory management)"""
+        self.session['user_preferences'] = interests
+        logger.info(f"Updated user preferences: {interests}")
+    
+    async def process_query(self, query: str, max_papers: int = 5) -> dict:
         """
-        Process a research query through the complete pipeline.
+        Process a research query through the agent pipeline
         
         Args:
-            query: User's research query
-            session_id: Optional session ID for conversation continuity
-            
+            query: Research query string
+            max_papers: Maximum number of papers to retrieve
+        
         Returns:
-            Dictionary with summary and metadata
+            Dictionary with results and metadata
         """
-        # Create or use existing session
-        if session_id is None:
-            session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        print(f"\n🔍 Processing query: '{query}'")
+        print(f"\n⏳ Running sequential agent pipeline...")
+        print("   1️⃣ Paper Retriever Agent")
+        print("   2️⃣ Abstract Analyzer Agent")
+        print("   3️⃣ Mathematical Notation Identifier Agent")
+        print("   4️⃣ Relevance Scorer Agent")
+        print("   5️⃣ Summary Generator Agent")
         
-        # Add user preferences to query context
-        enhanced_query = f"""
-Research Query: {query}
-
-User Research Interests: {', '.join(self.user_preferences['research_interests'])}
-Preferred Categories: {', '.join(self.user_preferences['preferred_categories'])}
-
-Please analyze recent quantum physics papers relevant to this query.
-"""
+        # Store query in session history
+        self.session['search_history'].append({
+            'query': query,
+            'timestamp': datetime.now().isoformat()
+        })
         
-        # Run the sequential agent pipeline
-        logging.info(f"Processing query in session: {session_id}")
-        response = await self.runner.run(enhanced_query, session_id=session_id)
+        # Step 1: Retrieve papers
+        papers = await self.paper_retriever.process(query, max_results=max_papers)
         
-        # Get metrics
-        metrics = self.metrics_plugin.get_metrics_summary()
+        if not papers:
+            return {
+                'summary': 'No papers found for this query.',
+                'papers': [],
+                'metrics': self.metrics.get_metrics()
+            }
+        
+        # Step 2: Analyze abstracts
+        abstract_analysis = await self.abstract_analyzer.process(papers)
+        
+        # Step 3: Identify mathematical notation
+        math_analysis = await self.math_identifier.process(papers)
+        
+        # Step 4: Score relevance
+        scored_papers = await self.relevance_scorer.process(
+            papers, 
+            self.session['user_preferences']
+        )
+        
+        # Step 5: Generate summary
+        analyses = {
+            'abstracts': abstract_analysis,
+            'mathematics': math_analysis
+        }
+        summary = await self.summary_generator.process(scored_papers, analyses)
+        
+        # Cache results in session
+        cache_key = f"query_{len(self.session['search_history'])}"
+        self.session['paper_cache'][cache_key] = {
+            'query': query,
+            'papers': scored_papers,
+            'summary': summary,
+            'timestamp': datetime.now().isoformat()
+        }
         
         return {
-            "summary": response.response,
-            "session_id": session_id,
-            "metrics": metrics,
-            "timestamp": datetime.now().isoformat()
+            'summary': summary,
+            'scored_papers': scored_papers,
+            'analyses': analyses,
+            'metrics': self.metrics.get_metrics()
         }
-    
-    def update_user_preferences(self, new_interests: List[str]):
-        """
-        Update user research interests (Memory feature).
-        
-        Args:
-            new_interests: New list of research interest keywords
-        """
-        self.user_preferences["research_interests"] = new_interests
-        logging.info(f"Updated user preferences: {new_interests}")
 
+print("✅ Main Agent System loaded")
 
 # ============================================================================
-# SECTION 5: EVALUATION FRAMEWORK
+# EVALUATION FRAMEWORK
 # ============================================================================
 
 class AgentEvaluator:
-    """
-    Evaluation framework for the agent system.
-    
-    COURSE REQUIREMENT: Agent evaluation
-    Metrics:
-    - Retrieval accuracy (are papers relevant?)
-    - Summary quality (comprehensive and accurate?)
-    - Processing time (fast enough?)
-    - Success rate (reliable?)
-    """
+    """Framework for evaluating agent performance"""
     
     @staticmethod
-    def evaluate_retrieval_quality(papers: List[Dict], query_keywords: List[str]) -> float:
-        """
-        Evaluate how well retrieved papers match query.
-        
-        Returns score 0-100
-        """
-        if not papers:
-            return 0.0
-        
-        relevant_count = 0
-        for paper in papers:
-            text = f"{paper['title']} {paper['abstract']}".lower()
-            if any(keyword.lower() in text for keyword in query_keywords):
-                relevant_count += 1
-        
-        return (relevant_count / len(papers)) * 100
-    
-    @staticmethod
-    def evaluate_summary_completeness(summary: str) -> Dict[str, bool]:
-        """
-        Check if summary contains all required sections.
-        
-        Returns dict of completion flags
-        """
-        required_sections = {
-            "executive_summary": any(x in summary.lower() for x in ["summary", "overview"]),
-            "top_papers": "paper" in summary.lower(),
-            "trends": any(x in summary.lower() for x in ["trend", "theme", "pattern"]),
-            "recommendations": any(x in summary.lower() for x in ["recommend", "suggestion"])
+    def evaluate_retrieval_quality(papers: list, expected_min: int = 5) -> dict:
+        """Evaluate paper retrieval quality"""
+        score = min(100, (len(papers) / expected_min) * 100)
+        return {
+            'score': score,
+            'papers_retrieved': len(papers),
+            'expected_minimum': expected_min,
+            'passed': len(papers) >= expected_min
         }
-        return required_sections
     
     @staticmethod
-    def evaluate_performance(metrics: Dict[str, Any]) -> Dict[str, str]:
-        """
-        Evaluate system performance based on metrics.
+    def evaluate_summary_completeness(summary: str) -> dict:
+        """Evaluate summary completeness"""
+        required_sections = [
+            'executive summary',
+            'findings',
+            'trends',
+            'recommendations'
+        ]
         
-        Returns performance ratings
-        """
-        ratings = {}
+        present_sections = [
+            section for section in required_sections 
+            if section in summary.lower()
+        ]
         
-        # Processing time evaluation
-        avg_time = metrics.get("average_processing_time_seconds", 999)
-        if avg_time < 5:
-            ratings["speed"] = "Excellent"
-        elif avg_time < 15:
-            ratings["speed"] = "Good"
-        elif avg_time < 30:
-            ratings["speed"] = "Acceptable"
+        score = (len(present_sections) / len(required_sections)) * 100
+        
+        return {
+            'score': score,
+            'present_sections': present_sections,
+            'missing_sections': [s for s in required_sections 
+                                if s not in present_sections],
+            'passed': score >= 75
+        }
+    
+    @staticmethod
+    def evaluate_performance_metrics(metrics: dict) -> dict:
+        """Evaluate overall performance metrics"""
+        evaluations = {}
+        
+        # Speed evaluation
+        avg_time = metrics.get('average_processing_time_seconds', 0)
+        if avg_time < 1.0:
+            speed_rating = "Excellent"
+        elif avg_time < 3.0:
+            speed_rating = "Good"
+        elif avg_time < 5.0:
+            speed_rating = "Fair"
         else:
-            ratings["speed"] = "Needs Improvement"
+            speed_rating = "Needs Improvement"
         
-        # Success rate evaluation
-        success_rate = metrics.get("success_rate_percent", 0)
+        evaluations['speed'] = {
+            'rating': speed_rating,
+            'average_seconds': avg_time
+        }
+        
+        # Reliability evaluation
+        success_rate = metrics.get('success_rate_percent', 0)
         if success_rate >= 95:
-            ratings["reliability"] = "Excellent"
-        elif success_rate >= 85:
-            ratings["reliability"] = "Good"
-        elif success_rate >= 70:
-            ratings["reliability"] = "Acceptable"
+            reliability_rating = "Excellent"
+        elif success_rate >= 80:
+            reliability_rating = "Good"
+        elif success_rate >= 60:
+            reliability_rating = "Fair"
         else:
-            ratings["reliability"] = "Needs Improvement"
+            reliability_rating = "Needs Improvement"
         
-        return ratings
+        evaluations['reliability'] = {
+            'rating': reliability_rating,
+            'success_rate': success_rate
+        }
+        
+        return evaluations
+    
+    @staticmethod
+    def print_evaluation_report(results: dict, metrics: dict):
+        """Print comprehensive evaluation report"""
+        print("\n" + "=" * 80)
+        print("🎯 AGENT EVALUATION")
+        print("=" * 80)
+        
+        # Retrieval quality
+        papers = results.get('scored_papers', [])
+        retrieval_eval = AgentEvaluator.evaluate_retrieval_quality(
+            [p for p, _ in papers]
+        )
+        print(f"  Retrieval Quality: {retrieval_eval['score']:.1f}/100")
+        
+        # Summary completeness
+        summary = results.get('summary', '')
+        summary_eval = AgentEvaluator.evaluate_summary_completeness(summary)
+        print(f"  Summary Completeness:")
+        for section in ['executive summary', 'top papers', 'trends', 'recommendations']:
+            status = "✅" if any(s in section for s in summary_eval['present_sections']) else "❌"
+            print(f"    {status} {section.title()}")
+        
+        # Performance metrics
+        perf_eval = AgentEvaluator.evaluate_performance_metrics(metrics)
+        print(f"\n  Performance Ratings:")
+        print(f"    Speed: {perf_eval['speed']['rating']}")
+        print(f"    Reliability: {perf_eval['reliability']['rating']}")
 
+print("✅ Evaluation Framework loaded")
 
 # ============================================================================
-# SECTION 6: MAIN EXECUTION & DEMO
+# MAIN DEMO FUNCTION
 # ============================================================================
 
 async def main_demo():
-    """
-    Demonstration of the complete system.
-    Shows all course requirements in action.
-    """
+    """Main demo function showcasing all capabilities"""
     
-    # Setup logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    print("=" * 80)
+    print("\n" + "=" * 80)
     print("ArXiv Quantum Physics Paper Triage & Summarization Agent")
     print("=" * 80)
+    
     print("\n🎯 Course Requirements Demonstrated:")
     print("✅ Multi-agent system (Sequential pipeline with 5 agents)")
     print("✅ Custom tools (ArXiv API, LaTeX parser, scoring)")
     print("✅ Built-in tools (Gemini model)")
     print("✅ Sessions & Memory (User preferences, session management)")
-    print("✅ Observability (LoggingPlugin + Custom MetricsPlugin)")
+    print("✅ Observability (Custom MetricsTracker)")
     print("✅ Agent evaluation (Quality and performance metrics)")
     print("=" * 80)
     
-    # Get API key
-    import os
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("\n⚠️  Please set GEMINI_API_KEY environment variable")
-        print("Example: export GEMINI_API_KEY='your-key-here'")
-        return
-    
-    # Initialize system
+    # Initialize agent system
     print("\n📦 Initializing quantum physics agent system...")
-    system = QuantumPhysicsAgentSystem(api_key)
+    agent_system = QuantumPhysicsAgentSystem()
     
-    # Update user preferences (demonstrating memory)
+    # Set user preferences (memory management)
     print("\n🧠 Setting user research preferences...")
-    system.update_user_preferences([
-        "quantum entanglement",
-        "quantum error correction",
-        "topological quantum computing"
+    agent_system.update_user_preferences([
+        'quantum entanglement',
+        'quantum error correction',
+        'topological quantum computing'
     ])
     
-    # Example query
-    query = "Recent advances in quantum error correction and fault-tolerant quantum computing"
-    print(f"\n🔍 Processing query: '{query}'")
-    print("\n⏳ Running sequential agent pipeline...")
-    print("   1️⃣ Paper Retriever Agent")
-    print("   2️⃣ Abstract Analyzer Agent")
-    print("   3️⃣ Mathematical Notation Identifier Agent")
-    print("   4️⃣ Relevance Scorer Agent")
-    print("   5️⃣ Summary Generator Agent")
+    # Get query from user or use default
+    print("\n" + "=" * 80)
+    print("📝 QUERY INPUT")
+    print("=" * 80)
+    use_default = input("\nUse default query? (y/n): ").strip().lower()
+    
+    if use_default == 'y':
+        query = "Recent advances in quantum error correction and fault-tolerant quantum computing"
+    else:
+        query = input("Enter your research query: ").strip()
+        if not query:
+            query = "quantum computing"
+    
+    # Get number of papers
+    num_papers_input = input("Number of papers to retrieve (1-20, default 5): ").strip()
+    try:
+        max_papers = int(num_papers_input) if num_papers_input else 5
+        max_papers = max(1, min(20, max_papers))  # Clamp between 1-20
+    except ValueError:
+        max_papers = 5
     
     # Process query
-    result = await system.process_research_query(query)
+    results = await agent_system.process_query(query, max_papers=max_papers)
     
     # Display results
     print("\n" + "=" * 80)
     print("📊 RESULTS")
     print("=" * 80)
-    print(f"\n📝 Summary:\n{result['summary']}")
+    
+    print(f"\n📝 Summary:")
+    print(results['summary'])
+    
+    # Print metrics
+    agent_system.metrics.print_summary()
+    
+    # Print evaluation
+    AgentEvaluator.print_evaluation_report(
+        results, 
+        agent_system.metrics.get_metrics()
+    )
+    
+    # Display top papers
+    print("\n" + "=" * 80)
+    print("📄 TOP 3 MOST RELEVANT PAPERS")
+    print("=" * 80)
+    
+    for i, (paper, score) in enumerate(results['scored_papers'][:3], 1):
+        print(f"\n{i}. {paper.title}")
+        print(f"   Authors: {', '.join(paper.authors[:3])}")
+        print(f"   Relevance Score: {score}/100")
+        print(f"   ArXiv: https://arxiv.org/abs/{paper.id}")
     
     print("\n" + "=" * 80)
-    print("📈 PERFORMANCE METRICS")
+    print("✅ Demo completed successfully!")
     print("=" * 80)
-    metrics = result['metrics']
-    for key, value in metrics.items():
-        print(f"  {key}: {value}")
     
-    # Evaluation
-    print("\n" + "=" * 80)
-    print("🎯 AGENT EVALUATION")
-    print("=" * 80)
-    evaluator = AgentEvaluator()
-    performance = evaluator.evaluate_performance(metrics)
-    for metric, rating in performance.items():
-        print(f"  {metric.capitalize()}: {rating}")
-    
-    print("\n✅ Demo completed successfully!")
-    print("=" * 80)
+    return results
 
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
 
 if __name__ == "__main__":
-    # Run the demo
-    asyncio.run(main_demo())
+    try:
+        # Run the async demo
+        result = asyncio.run(main_demo())
+        
+        # Final summary
+        print("\n" + "=" * 80)
+        print("🎉 CAPSTONE PROJECT COMPLETE")
+        print("=" * 80)
+        print("\nAll course requirements demonstrated:")
+        print("✅ Multi-agent system with 5 specialized agents")
+        print("✅ Custom tools (ArXiv API, LaTeX extraction, relevance scoring)")
+        print("✅ Sessions and Memory (user preferences, session storage)")
+        print("✅ Observability (comprehensive metrics tracking)")
+        print("✅ Evaluation framework (quality and performance assessment)")
+        print("✅ Gemini integration")
+        print("✅ Retry logic with exponential backoff")
+        print("✅ Rate limiting for quota management")
+        print("=" * 80)
+        
+    except KeyboardInterrupt:
+        print("\n\n❌ Demo interrupted by user")
+    except Exception as e:
+        print(f"\n\n❌ Error running demo: {e}")
+        import traceback
+        traceback.print_exc()

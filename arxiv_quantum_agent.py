@@ -26,7 +26,7 @@ Course Requirements Demonstrated:
 To run in Visual Studio Code:
 python -m pip install google-generativeai
 $env:GEMINI_API_KEY = ""
-python arxiv_quantum_agent_v2.py
+python arxiv_quantum_agent.py
 
 """
 
